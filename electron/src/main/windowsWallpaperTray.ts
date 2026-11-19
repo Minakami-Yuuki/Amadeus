@@ -19,7 +19,13 @@ export class WindowsWallpaperTray {
   private open: () => void
   private quit: () => void
 
-  constructor(iconPath: string, open: () => void, quit: () => void, private readonly restoreTheme: () => void) {
+  constructor(
+    iconPath: string,
+    open: () => void,
+    quit: () => void,
+    private readonly restoreTheme: () => void,
+    private readonly toggleChatInput?: () => void,
+  ) {
     const icon = fs.existsSync(iconPath) ? nativeImage.createFromPath(iconPath) : nativeImage.createEmpty()
     this.hasIcon = !icon.isEmpty()
     this.tray = new Tray(icon)
@@ -36,6 +42,9 @@ export class WindowsWallpaperTray {
     this.tray.setContextMenu(Menu.buildFromTemplate([
       { label: labels[status], enabled: false },
       { type: 'separator' },
+      ...(this.toggleChatInput
+        ? [{ label: '对话浮窗（Ctrl+Shift+A）', click: this.toggleChatInput }]
+        : []),
       { label: 'Open Amadeus', click: this.open },
       { label: 'Restore built-in theme (Ctrl+Shift+F12)', click: this.restoreTheme },
       { label: 'Quit Amadeus', enabled: status !== 'restoring', click: this.quit },

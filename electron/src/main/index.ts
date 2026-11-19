@@ -2,10 +2,11 @@
  * Electron main process - spawns Python backend and creates the app window.
  */
 
-import { app, BrowserWindow, Menu, Notification, WebContentsView, dialog, ipcMain, screen, shell } from 'electron'
+import { app, BrowserWindow, Menu, Notification, WebContentsView, dialog, globalShortcut, ipcMain, screen, shell } from 'electron'
 import { spawn, ChildProcess } from 'child_process'
 import { randomBytes } from 'crypto'
 import http from 'http'
+import https from 'https'
 import path from 'path'
 import fs from 'fs'
 import { fileURLToPath } from 'url'
@@ -112,6 +113,10 @@ for (const dir of [USER_DATA_DIR, CACHE_DIR]) {
 }
 
 app.setPath('userData', USER_DATA_DIR)
+// A stable AppUserModelID keeps the pinned taskbar shortcut and the running
+// window in one group; without it Windows shows a second button using the
+// electron.exe icon instead of the Amadeus icon.
+if (process.platform === 'win32') app.setAppUserModelId('CodeAmadeus.Amadeus')
 app.commandLine.appendSwitch('disk-cache-dir', CACHE_DIR)
 const menuTemplate = applicationMenuTemplate(process.platform)
 Menu.setApplicationMenu(menuTemplate ? Menu.buildFromTemplate(menuTemplate) : null)
@@ -372,7 +377,11 @@ function backendHealthStatus(): Promise<BackendHealth> {
   })
 }
 
-async function waitForBackendReady(timeoutMs = 120_000, proc = pythonProcess): Promise<void> {
+// Local GPT-SoVITS warmup plus the SpriteForge character pack can push the first
+// start well past two minutes, so allow a ten minute budget before failing.
+const BACKEND_READY_TIMEOUT_MS = 600_000
+
+async function waitForBackendReady(timeoutMs = BACKEND_READY_TIMEOUT_MS, proc = pythonProcess): Promise<void> {
   await waitForBackendReadiness(proc, backendHealthStatus, BACKEND_PORT, timeoutMs)
   backendOwned = true
 }
@@ -549,7 +558,7 @@ async function launchBackend(): Promise<void> {
     backendOwned = false
     void windowsWallpaper?.stop().catch(error => console.error('[windows-wallpaper] backend exit cleanup:', error))
   })
-  await waitForBackendReady(120_000, proc)
+  await waitForBackendReady(BACKEND_READY_TIMEOUT_MS, proc)
   if (!await extensionInstaller.acceptLaunch(launchSettings, await extensionStartupStatus())) {
     delete launchPendingRevisions[EXTENSIONS_ENV]
     desktopSettings.reportExtensionWarning('Some extension startup revisions could not be confirmed; saved changes remain pending. Check the backend status before retrying.')
@@ -614,15 +623,58 @@ function guardTrustedRendererShell(window: BrowserWindow): void {
   window.webContents.on('will-redirect', guardNavigation)
 }
 
+type MainWindowBounds = { x?: number; y?: number; width: number; height: number }
+
+const MAIN_WINDOW_DEFAULT_BOUNDS: MainWindowBounds = { width: 1100, height: 800 }
+
+function mainWindowStatePath(): string {
+  return path.join(app.getPath('userData'), 'window-bounds.json')
+}
+
+// Restore bounds only when the saved rectangle still overlaps a connected display,
+// so unplugging the second monitor cannot strand the window off screen.
+function restoreMainWindowBounds(): MainWindowBounds {
+  try {
+    const raw = JSON.parse(fs.readFileSync(mainWindowStatePath(), 'utf8')) as Record<string, unknown>
+    const x = Number(raw.x)
+    const y = Number(raw.y)
+    const width = Number(raw.width)
+    const height = Number(raw.height)
+    if (![x, y, width, height].every(Number.isFinite) || width < 200 || height < 200) return MAIN_WINDOW_DEFAULT_BOUNDS
+    const visible = screen.getAllDisplays().some((display) => {
+      const area = display.workArea
+      return x < area.x + area.width - 80 && x + width > area.x + 80
+        && y < area.y + area.height - 80 && y + height > area.y + 80
+    })
+    if (!visible) return MAIN_WINDOW_DEFAULT_BOUNDS
+    return { x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) }
+  } catch {
+    return MAIN_WINDOW_DEFAULT_BOUNDS
+  }
+}
+
+function persistMainWindowBounds(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  try {
+    fs.writeFileSync(mainWindowStatePath(), JSON.stringify(mainWindow.getNormalBounds()))
+  } catch {
+    /* layout persistence is optional */
+  }
+}
+
 function createWindow(): void {
   const isWallpaperOnly = wantsWallpaper()
   const themeDefinition = desktopCatalogFields.AMADEUS_UI_THEME
   const startupTheme = startupValue('AMADEUS_UI_THEME', desktopSettings.snapshot(process.env), themeDefinition.default)
   const theme = (themeDefinition.options!.some(option => (typeof option === 'string' ? option : option.value) === startupTheme)
     ? String(startupTheme) : desktopSettings.verifiedThemeBase()) as keyof typeof TITLE_BAR_THEMES
+  const restoredBounds = restoreMainWindowBounds()
   mainWindow = new BrowserWindow({
-    width: 1100,
-    height: 800,
+    width: restoredBounds.width,
+    height: restoredBounds.height,
+    ...(restoredBounds.x !== undefined && restoredBounds.y !== undefined
+      ? { x: restoredBounds.x, y: restoredBounds.y }
+      : {}),
     minWidth: 600,
     minHeight: 400,
     icon: getAppIconPath(),
@@ -644,6 +696,17 @@ function createWindow(): void {
   setMainWindowTheme(theme)
   mainWindow.setMenuBarVisibility(false)
   mainWindow.setTitle('')
+  let boundsPersistTimer: ReturnType<typeof setTimeout> | undefined
+  const scheduleBoundsPersist = () => {
+    if (boundsPersistTimer) clearTimeout(boundsPersistTimer)
+    boundsPersistTimer = setTimeout(() => { boundsPersistTimer = undefined; persistMainWindowBounds() }, 500)
+  }
+  mainWindow.on('move', scheduleBoundsPersist)
+  mainWindow.on('resize', scheduleBoundsPersist)
+  mainWindow.on('close', () => {
+    if (boundsPersistTimer) { clearTimeout(boundsPersistTimer); boundsPersistTimer = undefined }
+    persistMainWindowBounds()
+  })
   mainWindow.webContents.on('before-input-event', (event, input) => {
     if (input.type === 'keyDown' && (input.control || input.meta) && input.shift && input.key.toLowerCase() === 'f12') {
       event.preventDefault()
@@ -682,6 +745,118 @@ function createWindow(): void {
     }
   })
   mainWindow.on('closed', () => { mainWindow = null })
+}
+
+// Floating always-on-top chat input. The wallpaper scene keeps rendering the
+// conversation; this window only carries the text box, so it stays small,
+// draggable and above everything else on the target display.
+let chatInputWindow: BrowserWindow | null = null
+
+const CHAT_INPUT_WIDTH = 560
+// Keep the window just tall enough for the bar plus one notice line; any extra
+// transparent height would swallow clicks meant for whatever sits underneath.
+const CHAT_INPUT_HEIGHT = 74
+
+function chatInputStatePath(): string {
+  return path.join(app.getPath('userData'), 'chat-input-bounds.json')
+}
+
+function chatInputBounds(): Electron.Rectangle {
+  try {
+    const raw = JSON.parse(fs.readFileSync(chatInputStatePath(), 'utf8')) as Record<string, unknown>
+    const x = Number(raw.x)
+    const y = Number(raw.y)
+    const onScreen = Number.isFinite(x) && Number.isFinite(y)
+      && screen.getAllDisplays().some((display) => {
+        const area = display.workArea
+        return x > area.x - 40 && x < area.x + area.width - 80
+          && y > area.y - 40 && y < area.y + area.height - 40
+      })
+    if (onScreen) return { x: Math.round(x), y: Math.round(y), width: CHAT_INPUT_WIDTH, height: CHAT_INPUT_HEIGHT }
+  } catch {
+    /* first run */
+  }
+  const area = wallpaperTargetDisplay().workArea
+  return {
+    x: Math.round(area.x + (area.width - CHAT_INPUT_WIDTH) / 2),
+    y: Math.round(area.y + area.height - CHAT_INPUT_HEIGHT - 72),
+    width: CHAT_INPUT_WIDTH,
+    height: CHAT_INPUT_HEIGHT,
+  }
+}
+
+function persistChatInputBounds(): void {
+  if (!chatInputWindow || chatInputWindow.isDestroyed()) return
+  try {
+    fs.writeFileSync(chatInputStatePath(), JSON.stringify(chatInputWindow.getBounds()))
+  } catch {
+    /* layout persistence is optional */
+  }
+}
+
+function openChatInputWindow(): void {
+  if (chatInputWindow && !chatInputWindow.isDestroyed()) {
+    chatInputWindow.show()
+    chatInputWindow.focus()
+    return
+  }
+  chatInputWindow = new BrowserWindow({
+    ...chatInputBounds(),
+    title: '',
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+    resizable: false,
+    movable: true,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    alwaysOnTop: true,
+    skipTaskbar: false,
+    hasShadow: false,
+    show: false,
+    icon: getAppIconPath(),
+    webPreferences: {
+      preload: path.join(__dirname, '..', 'preload', 'index.mjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      webSecurity: false,
+    },
+  })
+  chatInputWindow.setAlwaysOnTop(true, 'floating')
+  chatInputWindow.setVisibleOnAllWorkspaces?.(true, { visibleOnFullScreen: true })
+  guardTrustedRendererShell(chatInputWindow)
+  const query = { chatInput: '1' }
+  if (devServer) {
+    void chatInputWindow.loadURL(`${devServer.origin}?${new URLSearchParams(query).toString()}`)
+      .catch(() => {
+        const entry = path.join(__dirname, '..', 'renderer', 'index.html')
+        if (fs.existsSync(entry)) void chatInputWindow?.loadFile(entry, { query })
+      })
+  } else {
+    void chatInputWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'), { query })
+  }
+  chatInputWindow.once('ready-to-show', () => chatInputWindow?.show())
+  let persistTimer: ReturnType<typeof setTimeout> | undefined
+  chatInputWindow.on('move', () => {
+    if (persistTimer) clearTimeout(persistTimer)
+    persistTimer = setTimeout(() => { persistTimer = undefined; persistChatInputBounds() }, 400)
+  })
+  chatInputWindow.on('close', () => {
+    if (persistTimer) { clearTimeout(persistTimer); persistTimer = undefined }
+    persistChatInputBounds()
+  })
+  chatInputWindow.on('closed', () => { chatInputWindow = null })
+}
+
+function toggleChatInputWindow(): void {
+  if (chatInputWindow && !chatInputWindow.isDestroyed() && chatInputWindow.isVisible()) {
+    persistChatInputBounds()
+    chatInputWindow.hide()
+    return
+  }
+  openChatInputWindow()
 }
 
 function normalizeLocalPort(value: unknown): number {
@@ -734,8 +909,29 @@ function normalizeWallpaperBridge(raw: unknown): WallpaperBridgeDescriptor | nul
   }
 }
 
+// The wallpaper scene and its interactive overlays follow one display. Default
+// stays the primary display; AMADEUS_WALLPAPER_MONITOR=secondary (or an exact
+// display id) moves the whole surface, matching the Lively wallpaper helper.
+function wallpaperTargetDisplay(): Electron.Display {
+  const requested = String(process.env.AMADEUS_WALLPAPER_MONITOR || '').trim().toLowerCase()
+  const primary = screen.getPrimaryDisplay()
+  if (!requested || requested === 'primary' || requested === 'main') return primary
+  const others = screen.getAllDisplays().filter((display) => display.id !== primary.id)
+  if (requested === 'secondary' || requested === 'second') {
+    if (!others.length) return primary
+    return others.slice().sort((left, right) => left.bounds.x - right.bounds.x)[0]
+  }
+  const index = Number(requested)
+  if (Number.isInteger(index) && index >= 1 && index <= screen.getAllDisplays().length) {
+    const ordered = screen.getAllDisplays().slice().sort((left, right) => left.bounds.x - right.bounds.x)
+    return ordered[index - 1]
+  }
+  const byId = screen.getAllDisplays().find((display) => String(display.id) === requested)
+  return byId || primary
+}
+
 function electronSliceBounds(): Electron.Rectangle {
-  const display = screen.getPrimaryDisplay()
+  const display = wallpaperTargetDisplay()
   const displayBounds = display.bounds
   if (wallpaperWindowPolicy(process.platform).hostMode === 'scene') {
     return displayBounds
@@ -744,7 +940,7 @@ function electronSliceBounds(): Electron.Rectangle {
 }
 
 function electronCanvasBounds(): Electron.Rectangle {
-  const displayBounds = screen.getPrimaryDisplay().bounds
+  const displayBounds = wallpaperTargetDisplay().bounds
   const left = Math.floor(displayBounds.x + displayBounds.width * electronSliceLayout.x)
   const top = Math.floor(displayBounds.y + displayBounds.height * electronSliceLayout.y)
   const right = Math.ceil(left + displayBounds.width * electronSliceLayout.width)
@@ -1146,14 +1342,14 @@ function workGlowUrl(): string {
 }
 
 function workOverlayBounds() {
-  const display = screen.getPrimaryDisplay()
+  const display = wallpaperTargetDisplay()
   return display.bounds
 }
 
 function workSlicePanelBounds() {
   if (workOverlayPanelBounds) return workOverlayPanelBounds
 
-  const { x, y, width, height } = screen.getPrimaryDisplay().bounds
+  const { x, y, width, height } = wallpaperTargetDisplay().bounds
   const panelWidth = Math.min(1500, Math.max(1120, width * 0.39))
   const panelHeight = Math.min(1070, Math.max(800, width * 0.2786))
   return {
@@ -1381,6 +1577,8 @@ function workPreviewPartitionToken(previewId: string): string {
 
 function isTrustedAmadeusRenderer(sender: Electron.WebContents): boolean {
   if (isPrimaryDesktopRenderer(sender)) return true
+  // The floating input window owns its own WebSocket session to the backend.
+  if (chatInputWindow && !chatInputWindow.isDestroyed() && chatInputWindow.webContents === sender) return true
   for (const surface of workPreviewSurfaces.values()) {
     if (surface.window.webContents === sender) return true
   }
@@ -2179,6 +2377,68 @@ ipcMain.handle('get-backend-connection', (event) => {
     authScheme: BACKEND_AUTH_SCHEME,
   }
 })
+// --- Development hot reload -----------------------------------------------------
+// Renderer changes already hot-swap through Vite. Python has no such luxury, so
+// watch the backend sources and cycle only the Python child: no Electron restart,
+// no lost window state. AMADEUS_HOT_RELOAD=0 disables it.
+
+let backendReloadTimer: NodeJS.Timeout | null = null
+let backendReloadInFlight = false
+
+function pythonHotReloadEnabled(): boolean {
+  if (app.isPackaged) return false
+  return String(process.env.AMADEUS_HOT_RELOAD ?? '1') !== '0'
+}
+
+function scheduleBackendReload(reason: string): void {
+  if (!pythonHotReloadEnabled()) return
+  if (backendReloadTimer) clearTimeout(backendReloadTimer)
+  backendReloadTimer = setTimeout(() => {
+    backendReloadTimer = null
+    void reloadBackend(reason)
+  }, 700)
+}
+
+async function reloadBackend(reason: string): Promise<void> {
+  if (backendReloadInFlight) return
+  backendReloadInFlight = true
+  console.log(`[backend-reload] ${reason} → restarting Python backend`)
+  try {
+    await stopBackend()
+    await startBackend()
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send('backend-reload.finished')
+    }
+    console.log('[backend-reload] backend ready again')
+  } catch (error) {
+    console.error('[backend-reload] failed', error)
+  } finally {
+    backendReloadInFlight = false
+  }
+}
+
+function watchBackendSources(): void {
+  if (!pythonHotReloadEnabled()) return
+  const roots = ['server', 'tts', 'core', 'llm', 'config', 'wallpaper', 'render', 'tools']
+  let watched = 0
+  for (const rel of roots) {
+    const dir = path.join(PROJECT_ROOT, rel)
+    if (!fs.existsSync(dir)) continue
+    try {
+      fs.watch(dir, { recursive: true }, (_event, filename) => {
+        const name = String(filename || '')
+        if (!/\.(py|json|mjs|js|html|toml)$/.test(name)) return
+        if (name.includes('__pycache__')) return
+        scheduleBackendReload(`${rel}/${name}`)
+      })
+      watched += 1
+    } catch (error) {
+      console.error('[backend-reload] cannot watch', rel, error)
+    }
+  }
+  console.log(`[backend-reload] watching ${watched} source trees (AMADEUS_HOT_RELOAD=0 disables)`)
+}
+
 ipcMain.handle('restart-backend', async (event) => {
   if (!isTrustedBackendRenderer(event.sender)) return false
   try {
@@ -2370,6 +2630,149 @@ ipcMain.handle('chat-avatars.clear', (event, role: ChatAvatarRole) => {
       error: error instanceof Error ? error.message : String(error),
     }
   }
+})
+// The avatar panel can be raised on demand while a normal application covers
+// the wallpaper display, then lowered again once the conversation goes idle.
+let companionAutoShown = false
+
+// Diagnostics for the auto show/hide decisions; the renderer has no file access
+// and this path is impossible to inspect from the UI alone.
+function logCompanionAuto(message: string): void {
+  try {
+    fs.appendFileSync(
+      path.join(PROJECT_ROOT, 'runtime', 'logs', 'companion-autoshow.log'),
+      `${new Date().toISOString()} ${message}\n`,
+    )
+  } catch {
+    /* logging is best effort */
+  }
+}
+
+ipcMain.handle('companion.auto-show', async (event) => {
+  if (!isTrustedBackendRenderer(event.sender)) {
+    logCompanionAuto('auto-show rejected: untrusted sender')
+    return false
+  }
+  if (companionPanel.isOpen) {
+    logCompanionAuto('auto-show skipped: already open')
+    return true
+  }
+  if (!companionBridge) {
+    logCompanionAuto('auto-show failed: no wallpaper bridge yet')
+    return false
+  }
+  try {
+    companionAutoShown = await companionPanel.toggle('')
+    logCompanionAuto(`auto-show -> ${companionAutoShown}`)
+  } catch (error) {
+    logCompanionAuto(`auto-show threw: ${error instanceof Error ? error.message : String(error)}`)
+    return false
+  }
+  return companionAutoShown
+})
+ipcMain.handle('companion.auto-hide', async (event) => {
+  if (!isTrustedBackendRenderer(event.sender)) return false
+  if (!companionAutoShown) return false
+  companionAutoShown = false
+  if (!companionPanel.isOpen) {
+    logCompanionAuto('auto-hide: already closed')
+    return true
+  }
+  try {
+    await companionPanel.close()
+    logCompanionAuto('auto-hide -> closed')
+  } catch (error) {
+    logCompanionAuto(`auto-hide threw: ${error instanceof Error ? error.message : String(error)}`)
+    return false
+  }
+  return true
+})
+ipcMain.handle('chat-input.wallpaper-bounds', (event) => {
+  if (!isTrustedBackendRenderer(event.sender)) return null
+  return wallpaperTargetDisplay().bounds
+})
+// The CRT screen rect is where the wallpaper actually shows the conversation;
+// occlusion is judged against this instead of the whole monitor.
+ipcMain.handle('chat-input.conversation-bounds', (event) => {
+  if (!isTrustedBackendRenderer(event.sender)) {
+    logCompanionAuto('conversation-bounds rejected: untrusted sender')
+    return null
+  }
+  const rect = electronSliceBounds()
+  logCompanionAuto(`probe conversation-bounds ${rect.x},${rect.y} ${rect.width}x${rect.height}`)
+  return rect
+})
+function deepseekApiKey(): string {
+  const fromProcess = String(process.env.DEEPSEEK_API_KEY || '').trim()
+  if (fromProcess) return fromProcess
+  try {
+    const raw = fs.readFileSync(path.join(PROJECT_ROOT, '.env'), 'utf8')
+    const match = raw.match(/^\s*DEEPSEEK_API_KEY\s*=\s*(.+)$/m)
+    return match ? match[1].trim().replace(/^["']|["']$/g, '') : ''
+  } catch {
+    return ''
+  }
+}
+
+ipcMain.handle('deepseek.balance', (event) => {
+  if (!isTrustedBackendRenderer(event.sender)) return { ok: false, error: 'untrusted' }
+  const key = deepseekApiKey()
+  if (!key) return { ok: false, error: 'no-key' }
+  return new Promise<Record<string, unknown>>((resolve) => {
+    const request = https.request({
+      hostname: 'api.deepseek.com',
+      path: '/user/balance',
+      method: 'GET',
+      timeout: 8000,
+      headers: { Authorization: `Bearer ${key}`, Accept: 'application/json' },
+    }, (response) => {
+      let body = ''
+      response.setEncoding('utf8')
+      response.on('data', (chunk: string) => { body += chunk })
+      response.on('end', () => {
+        try {
+          const parsed = JSON.parse(body) as {
+            is_available?: boolean
+            balance_infos?: Array<{ currency?: string; total_balance?: string }>
+          }
+          const info = Array.isArray(parsed.balance_infos) ? parsed.balance_infos[0] : undefined
+          const total = info ? Number(info.total_balance) : Number.NaN
+          if (!Number.isFinite(total)) {
+            resolve({ ok: false, error: `status-${response.statusCode}` })
+            return
+          }
+          resolve({
+            ok: true,
+            total,
+            currency: String(info?.currency || 'CNY'),
+            available: parsed.is_available !== false,
+          })
+        } catch {
+          resolve({ ok: false, error: 'parse' })
+        }
+      })
+    })
+    request.on('timeout', () => { request.destroy(); resolve({ ok: false, error: 'timeout' }) })
+    request.on('error', (error) => resolve({ ok: false, error: String(error) }))
+    request.end()
+  })
+})
+ipcMain.handle('chat-input.set-click-through', (event, ignore: unknown) => {
+  if (!isTrustedBackendRenderer(event.sender)) return false
+  if (!chatInputWindow || chatInputWindow.isDestroyed()) return false
+  // Transparent pixels still belong to the window, so pass clicks through unless
+  // the pointer is actually over the bar.
+  chatInputWindow.setIgnoreMouseEvents(Boolean(ignore), { forward: true })
+  return true
+})
+ipcMain.handle('chat-input.toggle', () => {
+  toggleChatInputWindow()
+  return true
+})
+ipcMain.handle('chat-input.hide', () => {
+  persistChatInputBounds()
+  chatInputWindow?.hide()
+  return true
 })
 ipcMain.handle('main-window.focus', (event) => {
   const isWindowsSlice = process.platform === 'win32'
@@ -2798,7 +3201,7 @@ ipcMain.handle('work-overlay.set-mouse-ignore', (event, ignore: boolean) => {
 ipcMain.handle('work-overlay.set-panel-bounds', (event, bounds: Electron.Rectangle) => {
   if (!isWorkPanelRenderer(event.sender)) return false
   if (!bounds) return false
-  const display = screen.getPrimaryDisplay().bounds
+  const display = wallpaperTargetDisplay().bounds
   const next = {
     x: Math.round(display.x + Number(bounds.x || 0)),
     y: Math.round(display.y + Number(bounds.y || 0)),
@@ -2813,7 +3216,7 @@ ipcMain.handle('work-overlay.set-panel-bounds', (event, bounds: Electron.Rectang
 ipcMain.handle('work-overlay.set-hit-regions', (event, boundsList: Electron.Rectangle[]) => {
   if (!isWorkPanelRenderer(event.sender)) return false
   if (!Array.isArray(boundsList)) return false
-  const display = screen.getPrimaryDisplay().bounds
+  const display = wallpaperTargetDisplay().bounds
   const next = boundsList
     .map(bounds => ({
       x: Math.round(display.x + Number(bounds.x || 0)),
@@ -2880,7 +3283,13 @@ function ensureWindowsWallpaperTray(): void {
     mainWindow?.show()
     mainWindow?.focus()
   }
-  windowsWallpaperTray = new WindowsWallpaperTray(APP_ICON_PATH, showMain, () => app.quit(), () => { void restoreBuiltinTheme() })
+  windowsWallpaperTray = new WindowsWallpaperTray(
+    APP_ICON_PATH,
+    showMain,
+    () => app.quit(),
+    () => { void restoreBuiltinTheme() },
+    () => toggleChatInputWindow(),
+  )
 }
 
 // before-quit is not emitted for Windows shutdown/logoff. Start best-effort
@@ -2904,7 +3313,9 @@ app.whenReady().then(async () => {
   // This change owns Windows startup only; retain the existing non-Windows
   // second-instance lifecycle until that path is qualified independently.
   if (process.platform === 'win32' && !gotSingleInstanceLock) return
-  if (process.platform === 'win32' && wantsWallpaper()) {
+  // The tray carries the chat-input toggle, so keep it available in every
+  // Windows start mode rather than only when the wallpaper is engaged.
+  if (process.platform === 'win32') {
     ensureWindowsWallpaperTray()
   }
   let backendStartFailed = false
@@ -2913,6 +3324,11 @@ app.whenReady().then(async () => {
     if (extensionCatalog.hasScheduled()) await extensionCatalog.applyScheduled(extensionUpdateBoundary)
   }
   catch (error) { desktopSettings.reportExtensionWarning(error instanceof Error ? error.message : 'Scheduled plugin installation failed; review Manage plugins.') }
+  // Paint the shell while the Python runtime boots: local GPT-SoVITS warmup plus
+  // the character pack make a fully-ready backend take tens of seconds, and the
+  // renderer reconnects on its own once the socket is available.
+  if (!mainWindow || mainWindow.isDestroyed()) createWindow()
+  if (process.env.AMADEUS_CHAT_INPUT !== '0') openChatInputWindow()
   try {
     await startBackend()
   } catch (error) {
@@ -2920,7 +3336,6 @@ app.whenReady().then(async () => {
     console.error('[electron] backend failed to become ready', error)
   }
   if (applicationLifecycle.isQuitting) return
-  if (!mainWindow || mainWindow.isDestroyed()) createWindow()
   extensionCatalog.startAutomaticChecking()
   if (process.platform === 'win32' && (backendStartFailed || windowsWallpaperTray?.hasIcon === false)) mainWindow?.show()
   if (applicationLifecycle.completeStartup()) {
@@ -2928,6 +3343,12 @@ app.whenReady().then(async () => {
     mainWindow?.focus()
   }
   if (wantsWorkOverlay()) createWorkOverlayWindow()
+  watchBackendSources()
+  try {
+    globalShortcut.register('CommandOrControl+Shift+A', () => toggleChatInputWindow())
+  } catch (error) {
+    console.error('[chat-input] shortcut registration failed', error)
+  }
   screen.on('display-metrics-changed', updateElectronSliceBounds)
   screen.on('display-added', updateElectronSliceBounds)
   screen.on('display-removed', updateElectronSliceBounds)

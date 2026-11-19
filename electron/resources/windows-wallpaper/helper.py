@@ -999,6 +999,22 @@ class LivelyHost:
             raise ValueError("Expected exactly one primary Lively display")
         return primary[0]
 
+    def target_monitor(self):
+        # AMADEUS_WALLPAPER_MONITOR mirrors the Electron overlay choice: the
+        # scene can live on a secondary display instead of the primary one.
+        requested = (os.environ.get("AMADEUS_WALLPAPER_MONITOR") or "").strip().lower()
+        if not requested or requested in ("primary", "main"):
+            return self.primary_monitor()
+        screens = self.get_screens()
+        by_name = [screen.Monitor for screen, _ in screens if screen.Monitor.strip().lower() == requested]
+        if by_name:
+            return by_name[0]
+        if requested in ("secondary", "second"):
+            secondary = [screen.Monitor for screen, is_primary in screens if not is_primary]
+            if secondary:
+                return secondary[0]
+        return self.primary_monitor()
+
     def write_project(self, url):
         directory = Path(text_value(self.get_settings(), 33)) / "wallpapers" / "amadeus-managed"
         atomic_json(directory / "LivelyInfo.json", dict(AppVersion=SUPPORTED_VERSION, Title="Amadeus", Desc="Managed by Amadeus",
@@ -1021,7 +1037,7 @@ class LivelyHost:
         self.rpc.call("Desktop", "CloseWallpaperLibrary", string(2, project))
 
     def screenshot(self, file):
-        self.rpc.call("Desktop", "TakeScreenshot", string(1, self.primary_monitor()) + string(2, str(file.resolve())))
+        self.rpc.call("Desktop", "TakeScreenshot", string(1, self.target_monitor()) + string(2, str(file.resolve())))
         if not file.is_file():
             raise OSError("The Lively player did not produce a screenshot.")
 
@@ -1105,7 +1121,7 @@ def main(args=None) -> int:
             report(dict(status="restored"))
             return 0
         host.ensure_running()
-        snapshot = Snapshot(host.write_project(args[1]), host.primary_monitor(), host.get_options(),
+        snapshot = Snapshot(host.write_project(args[1]), host.target_monitor(), host.get_options(),
                             host.get_wallpapers(), host.started_process)
 
         def body():

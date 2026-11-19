@@ -624,6 +624,8 @@ _JA_LANGUAGE_LOCK = (
     "- ユーザーの発言や会話履歴に中国語が含まれていても、返答の本文を中国語にしない。\n"
     "- 日本語以外の入力も内容を理解して、日本語で答える。この規則は、例文・会話履歴・入力言語より優先する。\n"
     "- 中国語をそのまま残せるのは、短い正確な引用、固有名詞、URL、コード、必要不可欠なツール・委託の引数だけである。\n"
+    "- 毎回の返答を同じ挨拶（「おはよう」など）や同じ前置きで始めない。会話履歴の冒頭フレーズを真似しない。\n"
+    "- 相槌・前置き・自己紹介を付けず、いきなり本題から話す。\n"
 )
 
 _EN_LANGUAGE_LOCK = (
@@ -632,6 +634,26 @@ _EN_LANGUAGE_LOCK = (
     "- Do not switch languages because of the user's input language or chat history.\n"
     "- Keep exact short quotes, proper nouns, URLs, code, and necessary tool/delegate arguments unchanged.\n"
 )
+
+
+# Cross-session memory: the backend registers a callable that returns a compact
+# digest of earlier conversations; prompts stay free of session imports.
+_MEMORY_PROVIDER = None
+
+
+def set_memory_provider(provider) -> None:
+    global _MEMORY_PROVIDER
+    _MEMORY_PROVIDER = provider
+
+
+def _memory_block() -> str:
+    if _MEMORY_PROVIDER is None:
+        return ""
+    try:
+        block = str(_MEMORY_PROVIDER() or "").strip()
+    except Exception:
+        return ""
+    return f"\n\n{block}" if block else ""
 
 
 def get_system_prompt(
@@ -652,6 +674,7 @@ def get_system_prompt(
         lang = "日文"
 
     intent = _delegate_intent_required()
+    memory = _memory_block()
     if lang == "英文":
         with_delegate = render(_EN_WITH_DELEGATE) + render_provider_routing_addon(language="en")
         if intent:
@@ -660,11 +683,11 @@ def get_system_prompt(
             )
         bedrock = render(_EN_BEDROCK) + render_provider_routing_addon(language="en")
         return {
-            "base": render(_EN_BASE),
-            "with_delegate": with_delegate,
-            "bedrock": bedrock,
+            "base": render(_EN_BASE) + memory,
+            "with_delegate": with_delegate + memory,
+            "bedrock": bedrock + memory,
             "hybrid_local": _EN_HYBRID_LOCAL,
-        }.get(variant, with_delegate)
+        }.get(variant, with_delegate + memory)
 
     base = _japanese_base(use_character_override=use_character_override)
     with_delegate = base + render(_JA_DELEGATE_ADDON) + render_provider_routing_addon(language="ja")
@@ -675,11 +698,11 @@ def get_system_prompt(
     bedrock = (base + _JA_BEDROCK_VERBOSITY_ADDON
         + render(_JA_BEDROCK_DELEGATE_ADDON)) + render_provider_routing_addon(language="ja")
     return {
-        "base": base,
-        "with_delegate": with_delegate,
-        "bedrock": bedrock,
+        "base": base + memory,
+        "with_delegate": with_delegate + memory,
+        "bedrock": bedrock + memory,
         "hybrid_local": render(_JA_HYBRID_LOCAL),
-    }.get(variant, with_delegate)
+    }.get(variant, with_delegate + memory)
 
 
 def get_structured_control_prompt() -> str:

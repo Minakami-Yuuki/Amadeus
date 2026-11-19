@@ -214,9 +214,15 @@ export function useBackend() {
     }
   }, [])
 
-  // auto-connect to Python backend (via Electron IPC or direct URL)
+  // auto-connect to Python backend (via Electron IPC or direct URL). The shell is
+  // painted before the runtime finishes booting, so keep retrying until the
+  // connection is available instead of staying unusable after one attempt.
   useEffect(() => {
+    let cancelled = false
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
+    let attempts = 0
     const init = async () => {
+      if (cancelled) return
       const amadeus = window.amadeus
       try {
         if (amadeus) {
@@ -229,10 +235,22 @@ export function useBackend() {
         // corresponding Python backend runs in explicit development mode.
         connect({ url: 'ws://127.0.0.1:17777/ws', protocols: [] })
       } catch (error) {
-        console.error('[backend-connection] unavailable', error)
+        // A local GPT-SoVITS start can take minutes, so keep waiting for the
+        // runtime instead of giving up after a fixed number of attempts; only the
+        // first few failures are logged to keep the console usable.
+        attempts += 1
+        if (attempts <= 3) console.error('[backend-connection] unavailable', error)
+        if (!cancelled) {
+          const delay = Math.min(15_000, 2_000 * attempts)
+          retryTimer = setTimeout(() => { void init() }, delay)
+        }
       }
     }
-    init()
+    void init()
+    return () => {
+      cancelled = true
+      if (retryTimer) clearTimeout(retryTimer)
+    }
   }, [connect])
 
   return { send, subscribe, connected, reconnect }

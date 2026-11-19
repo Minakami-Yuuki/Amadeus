@@ -111,6 +111,12 @@ export class CompanionPanel {
     return result
   }
 
+  // Lets the shell decide whether the avatar panel is already showing without
+  // flipping it (the renderer-facing toggle is intentionally state-changing).
+  get isOpen(): boolean {
+    return Boolean(this.window && !this.window.isDestroyed())
+  }
+
   async toggle(workItemId: string): Promise<boolean> {
     if (this.opening) return Boolean(this.window)
     if (this.window) { await this.close(); return false }
@@ -138,6 +144,9 @@ export class CompanionPanel {
           additionalArguments: [`--amadeus-companion-identity=${encodeURIComponent(JSON.stringify(initialIdentity))}`] },
       })
       this.window = window
+      // 'screen-saver' is the highest level Electron exposes on Windows, so the
+      // avatar panel stays above normal always-on-top windows too.
+      window.setAlwaysOnTop(true, 'screen-saver')
       const url = `http://127.0.0.1:${bridge.assetPort}/render/web/companion_panel.html?bridgePort=${bridge.bridgePort}&v=${encodeURIComponent(bridge.assetVersion)}`
       window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
       window.webContents.on('will-attach-webview', event => event.preventDefault())
@@ -159,6 +168,7 @@ export class CompanionPanel {
       if (window.isDestroyed()) return false
       this.dock(this.options.target(workItemId))
       window.showInactive()
+      window.setAlwaysOnTop(true, 'screen-saver')
       this.publish()
       return true
     } catch (error) {

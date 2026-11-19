@@ -113,8 +113,35 @@ function AmadeusApp() {
   useEffect(() => {
     if (desktopProjection || !connected || !autoStartWallpaper || autoStartDoneRef.current) return
     autoStartDoneRef.current = true
-    void projections.startAutomatically().catch(error => console.error('[wallpaper] auto-start failed:', error))
+    void projections.startAutomatically().catch(error => {
+      // Release the latch so the next reconnect (e.g. after a dev backend
+      // reload) can restore the wallpaper instead of staying latched forever.
+      autoStartDoneRef.current = false
+      console.error('[wallpaper] auto-start failed:', error)
+    })
   }, [autoStartWallpaper, connected, desktopProjection, projections])
+
+  // A development backend reload tears the wallpaper session down with the old
+  // process, and the projection controller still believes it is active. Mark a
+  // pending re-arm and replay a full stop→start once the socket is back.
+  const pendingRearmRef = useRef(false)
+  useEffect(() => {
+    if (desktopProjection) return
+    const off = window.amadeus?.onBackendReloadFinished?.(() => {
+      pendingRearmRef.current = true
+      autoStartDoneRef.current = false
+    })
+    return () => { off?.() }
+  }, [desktopProjection])
+
+  useEffect(() => {
+    if (desktopProjection || !connected || !pendingRearmRef.current) return
+    pendingRearmRef.current = false
+    projections.exited()
+    void projections.start('wallpaper').catch(error => {
+      console.error('[wallpaper] re-arm after backend reload failed:', error)
+    })
+  }, [connected, desktopProjection, projections])
 
   useEffect(() => {
     if (desktopProjection) return

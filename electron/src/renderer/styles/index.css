@@ -2630,3 +2630,14 @@ html[data-theme-extension] .settings-inline-action[data-tone='danger']:is(:hover
 @container settings-main (max-width: 560px) { .extension-catalog-facts { grid-template-columns: 1fr; } .extension-catalog-facts dd { margin-bottom: 8px; } }
 
 .extension-catalog .settings-card-title, .extension-catalog .settings-status-pill { min-width: 0; max-width: 100%; overflow-wrap: anywhere; white-space: normal; }
+
+/* Floating chat input window: the BrowserWindow paints its own translucent bar. */
+html.chat-input-window,
+html.chat-input-window body,
+html.chat-input-window #root {
+  background: transparent !important;
+  overflow: hidden;
+}
+html.chat-input-window #root {
+  height: 100vh;
+}

@@ -2306,6 +2306,8 @@ async def bootstrap(port: int = 17777) -> None:
         playback_manager=playback_manager,
         player=player,
         on_interrupt=_handle_tts_interrupt,
+        # Bound lazily: touching the attribute would block until the background
+        # TTS load finishes, which is exactly what startup must avoid.
         cancel_synthesis=tts_runtime.cancel_pending if tts_runtime is not None else None,
         asr_manager_factory=_get_or_create_asr_manager,
         on_asr_unload=_clear_asr_manager,
@@ -2457,6 +2459,101 @@ async def bootstrap(port: int = 17777) -> None:
         vts_workers.append(loop.run_in_executor(None, _vts_action_mod.action_worker, vts_worker_stop))
         if vts_manager.connected and VTS_HEARTBEAT_ENABLED:
             vts_workers.append(loop.run_in_executor(None, _vts_action_mod.heartbeat_worker, vts_worker_stop))
+        # Cross-session memory: a short digest of the previous sessions rides along in
+        # the system prompt so a new conversation does not start from zero.
+        try:
+            from core import session_manager as _sessions_memory_mod
+            from llm import prompts as _prompts_mod
+            from server import session_memory as _session_memory_mod
+
+            _prompts_mod.set_memory_provider(
+                lambda: _session_memory_mod.build_memory_digest(
+                    _sessions_memory_mod.get_current_session_id()
+                )
+            )
+            logger.info("session memory enabled (AMADEUS_SESSION_MEMORY=0 disables)")
+        except Exception as exc:
+            logger.warning("session memory unavailable: %s", exc)
+
+        # Idle small talk: weekdays 10:00-18:00, only after a quiet stretch and never
+        # while a turn is live. AMADEUS_IDLE_CHATTER=0 turns it off.
+        try:
+            if str(os.environ.get("AMADEUS_IDLE_CHATTER", "1")).strip().lower() not in {"0", "false", "off", "no"}:
+                from server.idle_chatter import IDLE_CHATTER_PROMPT, IdleChatter
+
+                def _recent_dialog_context(limit: int = 8) -> str:
+                    """Last few turns of the active session, for topic continuity."""
+                    try:
+                        from core import session_manager as _sessions
+
+                        session_id = _sessions.get_current_session_id()
+                        if not session_id:
+                            return ""
+                        history, _ok = _sessions._read_session_history(session_id)
+                        dialog = list(getattr(history, "dialog", []) or [])
+                    except Exception:
+                        return ""
+                    lines: list[str] = []
+                    for entry in dialog[-limit:]:
+                        if not isinstance(entry, dict):
+                            continue
+                        role = "ユーザー" if entry.get("role") == "user" else "アメデウス"
+                        text = " ".join(str(entry.get("content") or "").split()).strip()
+                        if text:
+                            lines.append(f"{role}: {text[:200]}")
+                    return "\n".join(lines)
+
+                async def _author_idle_line(prompt: str) -> str:
+                    from llm import client as _llm_client_mod
+
+                    return await asyncio.to_thread(
+                        _llm_client_mod.remote_llm_messages_query,
+                        [
+                            {"role": "system", "content": IDLE_CHATTER_PROMPT},
+                            {"role": "user", "content": prompt},
+                        ],
+                        temperature=0.9,
+                        max_tokens=120,
+                        timeout=45.0,
+                        json_output=False,
+                    )
+
+                async def _record_idle_line(text: str) -> None:
+                    """Store the spoken opener and push it to open chat surfaces."""
+                    from core import session_manager as _sm_idle
+                    from server.event_bus import bus as _idle_bus
+                    from server.protocol import Method as _IdleMethod
+
+                    session_id = _sm_idle.get_current_session_id()
+                    if not session_id:
+                        return
+                    turn_id = f"idle-{time.time_ns()}"
+                    _sm_idle.append_session_message(
+                        session_id,
+                        role="assistant",
+                        content=text,
+                        turn_id=turn_id,
+                    )
+                    # Same event pair a normal assistant turn uses, so the control
+                    # panel shows the line as a bubble the moment it is spoken.
+                    await _idle_bus.emit(_IdleMethod.CHAT_TOKEN, {
+                        "token": text, "turn_id": turn_id, "session_id": session_id,
+                    })
+                    await _idle_bus.emit(_IdleMethod.CHAT_COMPLETE, {
+                        "full_text": text, "turn_id": turn_id, "session_id": session_id,
+                    })
+
+                idle_chatter = IdleChatter(
+                    sink=_speak_vn_reaction,
+                    author=_author_idle_line,
+                    context=_recent_dialog_context,
+                    busy=lambda: bool(chat_h.is_busy()),
+                    record=_record_idle_line,
+                )
+                idle_chatter.start()
+        except Exception as exc:  # never block startup on optional small talk
+            logger.warning("idle chatter unavailable: %s", exc)
+
         backend_ready = True
         logger.info(f"backend server ready on ws://127.0.0.1:{port}/ws")
         await server_task  # wait for server to finish

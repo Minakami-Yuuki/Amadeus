@@ -43,6 +43,7 @@ export declare global {
     getDesktopSettings: () => Promise<Record<string, unknown> | null>
     getDesktopTheme: () => Promise<DesktopThemeState | null>
     onDesktopThemeChanged: (listener: () => void) => () => void
+    onBackendReloadFinished: (listener: () => void) => () => void
     setTitleBarTheme: (theme: 'classic' | 'wallpaper-slice') => Promise<boolean>
     getCompanionPortraitStatus: () => Promise<Record<string, unknown> | null>
     updateDesktopSettings: (update: {
@@ -85,6 +86,20 @@ export declare global {
       avatars?: { user: string; assistant: string }
     }>
     focusMainWindow: () => Promise<boolean>
+    toggleChatInput: () => Promise<boolean>
+    hideChatInput: () => Promise<boolean>
+    getWallpaperBounds: () => Promise<{ x: number; y: number; width: number; height: number } | null>
+    getConversationBounds: () => Promise<{ x: number; y: number; width: number; height: number } | null>
+    setChatInputClickThrough: (ignore: boolean) => Promise<boolean>
+    autoShowCompanion: () => Promise<boolean>
+    autoHideCompanion: () => Promise<boolean>
+    getDeepseekBalance: () => Promise<{
+      ok: boolean
+      total?: number
+      currency?: string
+      available?: boolean
+      error?: string
+    }>
     selectVisualFile: (kind: 'model' | 'core', startPath?: string) => Promise<{ ok: boolean; cancelled: boolean; path: string; detail: string }>
     selectVNFile: (kind: 'game' | 'agent' | 'hook' | 'script', startPath?: string) => Promise<{ ok: boolean; cancelled: boolean; path: string; detail: string }>
     openVNHelp: (page: 'agent' | 'scripts') => Promise<void>

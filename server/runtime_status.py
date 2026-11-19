@@ -26,6 +26,10 @@ from typing import Any, Callable
 
 logger = logging.getLogger("runtime_status")
 
+# Untracked model/asset bundles reach gigabytes; the runtime fingerprint only
+# needs code-scale inputs, so larger files contribute a stable marker instead.
+UNTRACKED_FINGERPRINT_LIMIT_BYTES = 8 * 1024 * 1024
+
 
 def _runtime_code_identity() -> dict[str, Any]:
     """Identify the exact checkout loaded by this long-lived process.
@@ -87,7 +91,15 @@ def _runtime_code_identity() -> dict[str, Any]:
                 path = root / raw_name.decode("utf-8", errors="surrogateescape")
                 if path.is_file():
                     fingerprint.update(b"\0")
-                    fingerprint.update(hashlib.sha256(path.read_bytes()).digest())
+                    try:
+                        # Dropped-in model/asset bundles can be gigabytes; hashing
+                        # them blocks startup. Identity only needs code-scale files.
+                        if path.stat().st_size <= UNTRACKED_FINGERPRINT_LIMIT_BYTES:
+                            fingerprint.update(hashlib.sha256(path.read_bytes()).digest())
+                        else:
+                            fingerprint.update(b"oversized")
+                    except OSError:
+                        fingerprint.update(b"unreadable")
         return {
             "commit_sha": commit_sha,
             "workspace_dirty": bool(status),

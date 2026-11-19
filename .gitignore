@@ -149,3 +149,6 @@ tools/debug_mouth/*.png
 
 # Generated, independently versioned defaults are injected only into distributions.
 /assets/bundled/
+
+# Local asset downloads (GB-scale zips); never hash or commit them.
+/_assets/

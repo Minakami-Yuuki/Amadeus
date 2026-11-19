@@ -28,6 +28,11 @@ contextBridge.exposeInMainWorld('amadeus', {
     ipcRenderer.on('desktop-theme.changed', handler)
     return () => ipcRenderer.removeListener('desktop-theme.changed', handler)
   },
+  onBackendReloadFinished: (listener: () => void): (() => void) => {
+    const handler = () => listener()
+    ipcRenderer.on('backend-reload.finished', handler)
+    return () => ipcRenderer.removeListener('backend-reload.finished', handler)
+  },
   setTitleBarTheme: (theme: 'classic' | 'wallpaper-slice'): Promise<boolean> => ipcRenderer.invoke('window-theme.set', theme),
   getCompanionPortraitStatus: (): Promise<Record<string, unknown> | null> => ipcRenderer.invoke('companion-portraits.status'),
   updateDesktopSettings: (update: {
@@ -61,6 +66,18 @@ contextBridge.exposeInMainWorld('amadeus', {
   selectChatAvatar: (role: 'user' | 'assistant'): Promise<{ ok: boolean; cancelled: boolean; error?: string; avatars?: { user: string; assistant: string } }> => ipcRenderer.invoke('chat-avatars.select', role),
   clearChatAvatar: (role: 'user' | 'assistant'): Promise<{ ok: boolean; error?: string; avatars?: { user: string; assistant: string } }> => ipcRenderer.invoke('chat-avatars.clear', role),
   focusMainWindow: (): Promise<boolean> => ipcRenderer.invoke('main-window.focus'),
+  toggleChatInput: (): Promise<boolean> => ipcRenderer.invoke('chat-input.toggle'),
+  hideChatInput: (): Promise<boolean> => ipcRenderer.invoke('chat-input.hide'),
+  getWallpaperBounds: (): Promise<{ x: number; y: number; width: number; height: number } | null> =>
+    ipcRenderer.invoke('chat-input.wallpaper-bounds'),
+  getConversationBounds: (): Promise<{ x: number; y: number; width: number; height: number } | null> =>
+    ipcRenderer.invoke('chat-input.conversation-bounds'),
+  setChatInputClickThrough: (ignore: boolean): Promise<boolean> =>
+    ipcRenderer.invoke('chat-input.set-click-through', ignore),
+  autoShowCompanion: (): Promise<boolean> => ipcRenderer.invoke('companion.auto-show'),
+  autoHideCompanion: (): Promise<boolean> => ipcRenderer.invoke('companion.auto-hide'),
+  getDeepseekBalance: (): Promise<{ ok: boolean; total?: number; currency?: string; available?: boolean; error?: string }> =>
+    ipcRenderer.invoke('deepseek.balance'),
   selectProjectDirectory: (): Promise<{ ok: boolean; cancelled: boolean; path: string; detail: string }> => ipcRenderer.invoke('project-directory.select'),
   selectVisualFile: (kind: 'model' | 'core', startPath?: string): Promise<{ ok: boolean; cancelled: boolean; path: string; detail: string }> => ipcRenderer.invoke('visual-file.select', kind, startPath),
   selectVNFile: (kind: 'game' | 'agent' | 'hook' | 'script', startPath?: string): Promise<{ ok: boolean; cancelled: boolean; path: string; detail: string }> => ipcRenderer.invoke('vn-file.select', kind, startPath),

@@ -16,6 +16,10 @@ import FluentIcon from './FluentIcon'
 import ProjectAppsPanel, { type ProjectAppSummary } from './ProjectAppsPanel'
 import { SettingsButton } from './SettingsPrimitives'
 import type { WorkFileSummary } from './WorkFilesPanel'
+
+// Voice input stays hidden while the machine has no capture device and the ASR
+// asset pack is not installed; set this to true once both are available.
+const VOICE_INPUT_ENABLED: boolean = false
 import CrtWorkWidget from './work/CrtWorkWidget'
 import { attentionRequestsFromEnvelope } from './work/attentionProjection'
 import type { AttentionRequest } from './work/types'
@@ -1606,14 +1610,19 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
               </select>
               <div className="flex-1" />
 
-              <button onClick={handleMicToggle}
-                title={t(asrListening ? 'Stop voice input' : 'Start voice input')}
-                aria-label={t(asrListening ? 'Stop voice input' : 'Start voice input')}
-                className="chat-round-button" data-state={asrListening ? 'listening' : undefined}
-                disabled={!connected || !sessionReady || sessionSwitching}
-              >
-                <FluentIcon name="Microphone" size={16} />
-              </button>
+              {/* This machine has no microphone and no ASR weights installed, so
+                  the composer stays text-only instead of surfacing a control that
+                  can only fail. Flip VOICE_INPUT_ENABLED once both exist. */}
+              {VOICE_INPUT_ENABLED ? (
+                <button onClick={handleMicToggle}
+                  title={t(asrListening ? 'Stop voice input' : 'Start voice input')}
+                  aria-label={t(asrListening ? 'Stop voice input' : 'Start voice input')}
+                  className="chat-round-button" data-state={asrListening ? 'listening' : undefined}
+                  disabled={!connected || !sessionReady || sessionSwitching}
+                >
+                  <FluentIcon name="Microphone" size={16} />
+                </button>
+              ) : null}
 
               <button
                 type="button"

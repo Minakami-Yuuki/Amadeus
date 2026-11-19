@@ -91,6 +91,7 @@ export declare global {
     getWallpaperBounds: () => Promise<{ x: number; y: number; width: number; height: number } | null>
     getConversationBounds: () => Promise<{ x: number; y: number; width: number; height: number } | null>
     setChatInputClickThrough: (ignore: boolean) => Promise<boolean>
+    logRenderer: (message: string) => Promise<boolean>
     autoShowCompanion: () => Promise<boolean>
     autoHideCompanion: () => Promise<boolean>
     getDeepseekBalance: () => Promise<{

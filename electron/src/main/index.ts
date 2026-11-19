@@ -2419,7 +2419,10 @@ async function reloadBackend(reason: string): Promise<void> {
 
 function watchBackendSources(): void {
   if (!pythonHotReloadEnabled()) return
-  const roots = ['server', 'tts', 'core', 'llm', 'config', 'wallpaper', 'render', 'tools']
+  // Python sources only. `wallpaper/`, `render/` and `config/` contain files the
+  // runtime itself rewrites at mount time, and watching them made every
+  // wallpaper start trigger another backend restart.
+  const roots = ['server', 'tts', 'core', 'llm']
   let watched = 0
   for (const rel of roots) {
     const dir = path.join(PROJECT_ROOT, rel)
@@ -2427,8 +2430,7 @@ function watchBackendSources(): void {
     try {
       fs.watch(dir, { recursive: true }, (_event, filename) => {
         const name = String(filename || '')
-        if (!/\.(py|json|mjs|js|html|toml)$/.test(name)) return
-        if (name.includes('__pycache__')) return
+        if (!name.endsWith('.py') || name.includes('__pycache__')) return
         scheduleBackendReload(`${rel}/${name}`)
       })
       watched += 1
@@ -2756,6 +2758,18 @@ ipcMain.handle('deepseek.balance', (event) => {
     request.on('error', (error) => resolve({ ok: false, error: String(error) }))
     request.end()
   })
+})
+ipcMain.handle('dev.log', (event, message: unknown) => {
+  if (!isTrustedBackendRenderer(event.sender)) return false
+  try {
+    fs.appendFileSync(
+      path.join(PROJECT_ROOT, 'runtime', 'logs', 'renderer.log'),
+      `${new Date().toISOString()} ${String(message).slice(0, 600)}\n`,
+    )
+  } catch {
+    /* best effort */
+  }
+  return true
 })
 ipcMain.handle('chat-input.set-click-through', (event, ignore: unknown) => {
   if (!isTrustedBackendRenderer(event.sender)) return false

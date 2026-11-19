@@ -74,6 +74,7 @@ contextBridge.exposeInMainWorld('amadeus', {
     ipcRenderer.invoke('chat-input.conversation-bounds'),
   setChatInputClickThrough: (ignore: boolean): Promise<boolean> =>
     ipcRenderer.invoke('chat-input.set-click-through', ignore),
+  logRenderer: (message: string): Promise<boolean> => ipcRenderer.invoke('dev.log', message),
   autoShowCompanion: (): Promise<boolean> => ipcRenderer.invoke('companion.auto-show'),
   autoHideCompanion: (): Promise<boolean> => ipcRenderer.invoke('companion.auto-hide'),
   getDeepseekBalance: (): Promise<{ ok: boolean; total?: number; currency?: string; available?: boolean; error?: string }> =>

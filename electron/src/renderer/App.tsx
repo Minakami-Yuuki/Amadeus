@@ -109,39 +109,31 @@ function AmadeusApp() {
   }, [desktopProjection, subscribe, projections])
 
   const autoStartWallpaper = searchParams.get('wallpaper') === '1'
-  const autoStartDoneRef = useRef(false)
-  useEffect(() => {
-    if (desktopProjection || !connected || !autoStartWallpaper || autoStartDoneRef.current) return
-    autoStartDoneRef.current = true
-    void projections.startAutomatically().catch(error => {
-      // Release the latch so the next reconnect (e.g. after a dev backend
-      // reload) can restore the wallpaper instead of staying latched forever.
-      autoStartDoneRef.current = false
-      console.error('[wallpaper] auto-start failed:', error)
-    })
-  }, [autoStartWallpaper, connected, desktopProjection, projections])
 
-  // A development backend reload tears the wallpaper session down with the old
-  // process, and the projection controller still believes it is active. Mark a
-  // pending re-arm and replay a full stop→start once the socket is back.
-  const pendingRearmRef = useRef(false)
+  // Mount the wallpaper whenever the projection is not active yet. Retrying beats
+  // a one-shot latch: a failed first attempt (backend still binding its asset
+  // port, a dev reload, the scene dropping out) used to leave a bare desktop
+  // until the next manual restart.
   useEffect(() => {
     if (desktopProjection) return
-    const off = window.amadeus?.onBackendReloadFinished?.(() => {
-      pendingRearmRef.current = true
-      autoStartDoneRef.current = false
-    })
-    return () => { off?.() }
-  }, [desktopProjection])
-
-  useEffect(() => {
-    if (desktopProjection || !connected || !pendingRearmRef.current) return
-    pendingRearmRef.current = false
-    projections.exited()
-    void projections.start('wallpaper').catch(error => {
-      console.error('[wallpaper] re-arm after backend reload failed:', error)
-    })
-  }, [connected, desktopProjection, projections])
+    void window.amadeus?.logRenderer?.(
+      `wallpaper auto-start: autoStart=${autoStartWallpaper} connected=${connected} active=${wallpaperActive}`,
+    )
+    if (!autoStartWallpaper || !connected || wallpaperActive) return
+    let attempts = 0
+    const attempt = () => {
+      if (attempts >= 8) return
+      attempts += 1
+      void projections.start('wallpaper')
+        .then(result => window.amadeus?.logRenderer?.(
+          `wallpaper start #${attempts} -> ${JSON.stringify(result)}`))
+        .catch(error => window.amadeus?.logRenderer?.(
+          `wallpaper start #${attempts} failed: ${String(error)}`))
+    }
+    attempt()
+    const timer = setInterval(attempt, 12_000)
+    return () => clearInterval(timer)
+  }, [autoStartWallpaper, connected, desktopProjection, projections, wallpaperActive])
 
   useEffect(() => {
     if (desktopProjection) return

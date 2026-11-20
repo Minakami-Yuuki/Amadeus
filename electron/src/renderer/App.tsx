@@ -110,6 +110,14 @@ function AmadeusApp() {
 
   const autoStartWallpaper = searchParams.get('wallpaper') === '1'
 
+  // A backend drop kills the wallpaper bridge while the projection controller
+  // still reports it active, which would block every later re-mount. Reset the
+  // projection as soon as the socket goes away.
+  useEffect(() => {
+    if (desktopProjection || connected) return
+    projections.exited()
+  }, [connected, desktopProjection, projections])
+
   // Mount the wallpaper whenever the projection is not active yet. Retrying beats
   // a one-shot latch: a failed first attempt (backend still binding its asset
   // port, a dev reload, the scene dropping out) used to leave a bare desktop
